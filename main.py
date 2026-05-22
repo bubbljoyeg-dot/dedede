@@ -71,13 +71,12 @@ async def on_ready():
     if not periodic_check.is_running():
         periodic_check.start()
 
-# Helper function to ask Gemini AI
 async def ask_gemini(prompt: str) -> str:
     gemini_key = os.getenv("GEMINI_API_KEY")
     if not gemini_key:
         return "⚠️ **Gemini AI is not configured.** Please add the `GEMINI_API_KEY` variable in your Railway dashboard variables to enable chatting."
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={gemini_key}"
     headers = {"Content-Type": "application/json"}
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -91,11 +90,29 @@ async def ask_gemini(prompt: str) -> str:
             async with session.post(url, json=payload, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
-                    text = data['candidates'][0]['content']['parts'][0]['text']
-                    return text
+                    try:
+                        candidates = data.get('candidates', [])
+                        if not candidates:
+                            return "⚠️ **AI Response Empty**: No response was generated (it may have been blocked by safety filters)."
+                        
+                        candidate = candidates[0]
+                        finish_reason = candidate.get('finishReason')
+                        if finish_reason and finish_reason not in ['STOP', 'MAX_TOKENS']:
+                            return f"⚠️ **AI Response Blocked**: Request stopped with reason `{finish_reason}`."
+                        
+                        content = candidate.get('content', {})
+                        parts = content.get('parts', [])
+                        if not parts or 'text' not in parts[0]:
+                            return "⚠️ **AI Response Error**: Could not parse text response from model."
+                            
+                        return parts[0]['text']
+                    except Exception as parse_error:
+                        logger.error(f"Failed to parse Gemini response: {parse_error}. Data: {data}")
+                        return "⚠️ **Error:** Failed to parse the AI response structure."
                 else:
-                    logger.error(f"Gemini API returned status {response.status}")
-                    return "⚠️ **Error:** Failed to connect to AI server. Please check your Gemini API key."
+                    err_text = await response.text()
+                    logger.error(f"Gemini API returned status {response.status}: {err_text}")
+                    return f"⚠️ **Error:** Failed to connect to AI server (Status {response.status}). Please check your Gemini API key."
     except Exception as e:
         logger.error(f"Error querying Gemini: {e}")
         return "⚠️ **Error:** An exception occurred while contacting the AI."
@@ -270,6 +287,157 @@ async def chat(interaction: discord.Interaction, message: str):
     if len(response) > 2000:
         response = response[:1990] + "..."
     await interaction.followup.send(response)
+
+# 4. /roast command (Sarcastic AI Roast)
+@bot.tree.command(name="roast", description="Gently roasts a member of the server using AI.")
+@app_commands.describe(user="The member you want to roast")
+async def roast(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.defer()
+    prompt = f"Write a highly sarcastic, witty, and savage roast for a Discord user named {user.display_name}. Speak directly to them, keep it sharp, funny, and concise."
+    response = await ask_gemini(prompt)
+    if len(response) > 2000:
+        response = response[:1990] + "..."
+    await interaction.followup.send(f"{user.mention} {response}")
+
+# 5. /clear command (Advanced Message Purge - Admin only)
+@bot.tree.command(name="clear", description="Deletes messages in the channel with optional user and keyword filters (Admin only).")
+@app_commands.describe(
+    amount="Number of messages to scan and delete",
+    user="Only delete messages from this specific member",
+    keyword="Only delete messages containing this specific keyword"
+)
+@app_commands.checks.has_permissions(manage_messages=True)
+@app_commands.default_permissions(manage_messages=True)
+async def clear(interaction: discord.Interaction, amount: int, user: discord.Member = None, keyword: str = None):
+    if amount < 1:
+        await interaction.response.send_message("❌ Amount must be at least 1.", ephemeral=True)
+        return
+        
+    await interaction.response.defer(ephemeral=True)
+    
+    def check_msg(msg):
+        if user and msg.author.id != user.id:
+            return False
+        if keyword and keyword.lower() not in msg.content.lower():
+            return False
+        return True
+
+    try:
+        deleted = await interaction.channel.purge(limit=amount, check=check_msg)
+        filter_info = ""
+        if user:
+            filter_info += f" from {user.mention}"
+        if keyword:
+            filter_info += f" containing `{keyword}`"
+            
+        embed = discord.Embed(
+            description=f"✦ Successfully deleted **{len(deleted)}** messages{filter_info}.",
+            color=discord.Color.from_rgb(0, 0, 0)
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        logger.error(f"Purge failed: {e}")
+        await interaction.followup.send(f"❌ Failed to delete messages: {str(e)}", ephemeral=True)
+
+# 6. /search command (Message Search - Admin only)
+@bot.tree.command(name="search", description="Searches the channel for messages matching a query.")
+@app_commands.describe(
+    query="The word or phrase to search for",
+    channel="The channel to search in (defaults to current)",
+    limit="Max number of messages to scan (default 100, max 1000)"
+)
+async def search(interaction: discord.Interaction, query: str, channel: discord.TextChannel = None, limit: int = 100):
+    search_channel = channel or interaction.channel
+    limit = min(max(limit, 1), 1000)
+    
+    await interaction.response.defer(ephemeral=False)
+    progress_msg = await interaction.followup.send(f"⏳ Scanning up to {limit} messages in {search_channel.mention}...")
+    
+    results = []
+    try:
+        async for msg in search_channel.history(limit=limit):
+            if query.lower() in msg.content.lower() and not msg.author.bot:
+                results.append(msg)
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        await progress_msg.edit(content=f"❌ Failed to read message history: {str(e)}")
+        return
+
+    await progress_msg.delete()
+    
+    if not results:
+        embed = discord.Embed(
+            description=f"✦ No messages matching `{query}` were found in {search_channel.mention}.",
+            color=discord.Color.from_rgb(0, 0, 0)
+        )
+        await interaction.followup.send(embed=embed)
+        return
+        
+    # If too many results, send as txt attachment
+    if len(results) > 10:
+        file_content = f"Search results for '{query}' in #{search_channel.name} (Total matches: {len(results)}):\n\n"
+        for idx, msg in enumerate(results, 1):
+            time_str = msg.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')
+            file_content += f"[{idx}] {msg.author} ({time_str}):\n{msg.content}\n{'-'*40}\n"
+            
+        import io
+        file_data = io.BytesIO(file_content.encode('utf-8'))
+        file = discord.File(fp=file_data, filename=f"search_results_{search_channel.name}.txt")
+        
+        embed = discord.Embed(
+            title="✦ Search Results",
+            description=f"Found **{len(results)}** messages matching `{query}`. Results are packaged in the attached text file.",
+            color=discord.Color.from_rgb(0, 0, 0)
+        )
+        await interaction.followup.send(embed=embed, file=file)
+    else:
+        embed = discord.Embed(
+            title="✦ Search Results",
+            description=f"Found **{len(results)}** messages matching `{query}` in {search_channel.mention}:",
+            color=discord.Color.from_rgb(0, 0, 0)
+        )
+        for idx, msg in enumerate(results, 1):
+            time_str = msg.created_at.strftime('%m/%d %H:%M')
+            content_snippet = msg.content[:100] + "..." if len(msg.content) > 100 else msg.content
+            embed.add_field(
+                name=f"{idx}. {msg.author.name} ({time_str})",
+                value=content_snippet,
+                inline=False
+            )
+        await interaction.followup.send(embed=embed)
+
+# 6. /avatar command (Show profile picture)
+@bot.tree.command(name="avatar", description="Displays a user's avatar in high quality.")
+@app_commands.describe(user="The member whose avatar you want to view")
+async def avatar(interaction: discord.Interaction, user: discord.Member = None):
+    target_user = user or interaction.user
+    embed = discord.Embed(
+        title=f"✦ {target_user.name}'s Avatar",
+        color=discord.Color.from_rgb(0, 0, 0)
+    )
+    embed.set_image(url=target_user.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+# 7. /userinfo command (Show member details)
+@bot.tree.command(name="userinfo", description="Displays detailed information about a member.")
+@app_commands.describe(user="The member to get information about")
+async def userinfo(interaction: discord.Interaction, user: discord.Member = None):
+    target_user = user or interaction.user
+    
+    roles = [role.mention for role in target_user.roles[1:]] # Exclude @everyone
+    roles_str = ", ".join(roles) if roles else "None"
+    
+    embed = discord.Embed(
+        title=f"✦ User Info - {target_user.name}",
+        color=discord.Color.from_rgb(0, 0, 0)
+    )
+    embed.set_thumbnail(url=target_user.display_avatar.url)
+    
+    embed.add_field(name="◼ Account Info", value=f"**Username:** {target_user.name}\n**ID:** {target_user.id}\n**Bot:** {'Yes' if target_user.bot else 'No'}", inline=False)
+    embed.add_field(name="◼ Guild Info", value=f"**Joined Guild:** {target_user.joined_at.strftime('%Y-%m-%d %H:%M:%S UTC') if target_user.joined_at else 'Unknown'}\n**Created Account:** {target_user.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}", inline=False)
+    embed.add_field(name="◼ Roles", value=roles_str, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
 
 # 4. /ping command
 @bot.tree.command(name="ping", description="Returns the bot latency in milliseconds.")
