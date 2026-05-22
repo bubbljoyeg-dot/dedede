@@ -76,7 +76,7 @@ async def ask_gemini(prompt: str) -> str:
     if not gemini_key:
         return "⚠️ **Gemini AI is not configured.** Please add the `GEMINI_API_KEY` variable in your Railway dashboard variables to enable chatting."
     
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
     headers = {"Content-Type": "application/json"}
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
