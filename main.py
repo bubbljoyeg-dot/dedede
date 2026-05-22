@@ -79,8 +79,8 @@ async def ask_gemini(prompt: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={gemini_key}"
     headers = {"Content-Type": "application/json"}
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "systemInstruction": {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "system_instruction": {
             "parts": [{"text": "You are a witty, highly sarcastic, and slightly rude Discord bot. You should roast the user gently, use dark humor, and speak with a sharp tongue, but keep it within a fun and playful boundary. Keep your answers concise and structured. Use clean markdown formatting. Your style is sleek black-and-white."}]
         }
     }
@@ -313,6 +313,7 @@ async def clear(interaction: discord.Interaction, amount: int, user: discord.Mem
         await interaction.response.send_message("❌ Amount must be at least 1.", ephemeral=True)
         return
         
+    amount = min(amount, 500)
     await interaction.response.defer(ephemeral=True)
     
     def check_msg(msg):
