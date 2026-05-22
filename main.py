@@ -26,6 +26,7 @@ class Bot(commands.Bot):
         intents.members = True
         
         super().__init__(command_prefix="!", intents=intents)
+        self.muted_channels = set()
 
     async def setup_hook(self):
         logger.info("Registering slash commands...")
@@ -81,7 +82,7 @@ async def ask_gemini(prompt: str) -> str:
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "system_instruction": {
-            "parts": [{"text": "You are a witty, highly sarcastic, and slightly rude Discord bot. You should roast the user gently, use dark humor, and speak with a sharp tongue, but keep it within a fun and playful boundary. Keep your answers concise and structured. Use clean markdown formatting. Your style is sleek black-and-white."}]
+            "parts": [{"text": "أنت بوت ديسكورد مصري، سرسجي، ساخر جداً، قليل الأدب ولسانك طويل بس بذكاء وخفة دم مصرية. بترد بالعامية المصرية الدارجة الساخرة. ردودك قصيرة، مقصفة للجبهات وقوية جداً. لا تزيد ردودك عن سطرين أو ثلاثة أبداً إلا للضرورة القصوى. استخدم تنسيق مارك داون بسيط ونظيف."}]
         }
     }
     
@@ -117,26 +118,66 @@ async def ask_gemini(prompt: str) -> str:
         logger.error(f"Error querying Gemini: {e}")
         return "⚠️ **Error:** An exception occurred while contacting the AI."
 
-# Mention listener for natural conversations
+# Mention and Auto-Reply listener with Mute capability
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Check if bot is mentioned in the message
-    if bot.user in message.mentions:
-        # Strip mentions to get the clean query
-        clean_content = message.content.replace(f"<@!{bot.user.id}>", "").replace(f"<@{bot.user.id}>", "").strip()
-        if not clean_content:
-            await message.reply("✦ Hello! How can I help you today? Type `/` to see my commands or talk to me.")
+    content = message.content.strip()
+    if not content:
+        return
+
+    # Normalize Arabic text for cleaner matching
+    normalized = content.lower()
+    normalized = normalized.replace('ة', 'ه').replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
+
+    # Mute keywords (shut up triggers)
+    mute_keywords = ["اسكت", "اخرس", "اخرص", "خرس", "خرص", "عرص", "خول", "زاني", "كسمك", "ابن الشرموطه", "ابن الشرموطة", "شرموطة", "شرموطه"]
+    
+    should_mute = False
+    for kw in mute_keywords:
+        if kw in normalized:
+            should_mute = True
+            break
+
+    is_mentioned = bot.user in message.mentions
+
+    if should_mute:
+        bot.muted_channels.add(message.channel.id)
+        async with message.channel.typing():
+            response = await ask_gemini("صاحب الرسالة شتمني وقالي اسكت. رد عليه بالعامية المصرية بأسلوب سافل وسخيف وقوله انك هتسكت ومش هترد تاني غير لو عملك منشن.")
+            await message.reply(response)
+        return
+
+    # Unmute checks
+    is_unmute = "اتكلم" in normalized or "انطق" in normalized or "اتكلم يا خول" in normalized
+    if is_unmute or is_mentioned:
+        if message.channel.id in bot.muted_channels:
+            bot.muted_channels.discard(message.channel.id)
+
+    is_muted = message.channel.id in bot.muted_channels
+
+    # Respond to all messages if the channel is NOT muted, or respond to mentions if muted
+    if is_mentioned or not is_muted:
+        # Strip the mention of the bot
+        clean_content = content.replace(f"<@!{bot.user.id}>", "").replace(f"<@{bot.user.id}>", "").strip()
+        
+        # If it was a mention but content is empty
+        if is_mentioned and not clean_content:
+            async with message.channel.typing():
+                response = await ask_gemini("رد بالعامية المصرية بأسلوب ساخر وسافل وقوله نعم يا روح امك عايز ايه؟")
+                await message.reply(response)
             return
 
+        prompt = clean_content if clean_content else content
+        
         async with message.channel.typing():
-            response = await ask_gemini(clean_content)
+            response = await ask_gemini(prompt)
             if len(response) > 2000:
                 response = response[:1990] + "..."
             await message.reply(response)
-            
+
     await bot.process_commands(message)
 
 # Error handler for slash commands
