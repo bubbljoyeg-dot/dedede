@@ -1,4 +1,6 @@
 import os
+import io
+import base64
 import logging
 import asyncio
 import aiohttp
@@ -72,17 +74,20 @@ async def on_ready():
     if not periodic_check.is_running():
         periodic_check.start()
 
-async def ask_gemini(prompt: str) -> str:
+async def ask_gemini(prompt: str, system_instruction: str = None) -> str:
     gemini_key = os.getenv("GEMINI_API_KEY")
     if not gemini_key:
         return "⚠️ **Gemini AI is not configured.** Please add the `GEMINI_API_KEY` variable in your Railway dashboard variables to enable chatting."
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
     headers = {"Content-Type": "application/json"}
+    
+    sys_inst = system_instruction or "أنت مساعد ذكاء اصطناعي محترف، جاد، ومثقف للغاية. تجيب بدقة وموضوعية بالعامية المصرية الراقية والمهذبة (مثال لأسلوبك الشات المعتاد: استخدام كلمات مثل 'يا معلم'، 'الحقيقة'، 'بص'، 'تمام'، 'كده'). تجنب تماماً أي سخرية أو قلة أدب أو مزاح غير لائق، وكن محترماً وودوداً. رتب ردودك ونظمها بشكل ممتاز ومقروء باستخدام الترقيم، النقاط، والعناوين العريضة وعلامات التنسيق (Markdown)."
+    
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "system_instruction": {
-            "parts": [{"text": "أنت بوت ديسكورد مصري، سرسجي، ساخر جداً، قليل الأدب ولسانك طويل بس بذكاء وخفة دم مصرية. بترد بالعامية المصرية الدارجة الساخرة. ردودك قصيرة، مقصفة للجبهات وقوية جداً. لا تزيد ردودك عن سطرين أو ثلاثة أبداً إلا للضرورة القصوى. استخدم تنسيق مارك داون بسيط ونظيف."}]
+            "parts": [{"text": sys_inst}]
         }
     }
     
@@ -145,9 +150,10 @@ async def on_message(message: discord.Message):
 
     if should_mute:
         bot.muted_channels.add(message.channel.id)
-        async with message.channel.typing():
-            response = await ask_gemini("صاحب الرسالة شتمني وقالي اسكت. رد عليه بالعامية المصرية بأسلوب سافل وسخيف وقوله انك هتسكت ومش هترد تاني غير لو عملك منشن.")
-            await message.reply(response)
+        # Edit-style feedback
+        status_msg = await message.reply("⚙️ جاري معالجة الطلب وصيانة النظام...")
+        response = await ask_gemini("صاحب الرسالة شتمني وقالي اسكت. رد عليه بالعامية المصرية بأسلوب مهذب ومحترف وجاد جداً وقوله انك هتسكت ومش هترد تاني غير لو عملك منشن.")
+        await status_msg.edit(content=response)
         return
 
     # Unmute checks
@@ -165,18 +171,19 @@ async def on_message(message: discord.Message):
         
         # If it was a mention but content is empty
         if is_mentioned and not clean_content:
-            async with message.channel.typing():
-                response = await ask_gemini("رد بالعامية المصرية بأسلوب ساخر وسافل وقوله نعم يا روح امك عايز ايه؟")
-                await message.reply(response)
+            status_msg = await message.reply("🔍 جاري البحث والاستعلام...")
+            response = await ask_gemini("رد باللغة العربية الفصحى وقوله مرحباً، أنا جاهز لمساعدتك. كيف يمكنني إفادتك اليوم؟")
+            await status_msg.edit(content=response)
             return
 
         prompt = clean_content if clean_content else content
         
-        async with message.channel.typing():
-            response = await ask_gemini(prompt)
-            if len(response) > 2000:
-                response = response[:1990] + "..."
-            await message.reply(response)
+        # Immediate placeholder response for extreme speed feeling
+        status_msg = await message.reply("🔍 جاري البحث والاستعلام...")
+        response = await ask_gemini(prompt)
+        if len(response) > 2000:
+            response = response[:1990] + "..."
+        await status_msg.edit(content=response)
 
     await bot.process_commands(message)
 
@@ -323,22 +330,92 @@ async def cleanup(interaction: discord.Interaction):
 @bot.tree.command(name="chat", description="Chat directly with the bot's AI.")
 @app_commands.describe(message="What do you want to say to the bot?")
 async def chat(interaction: discord.Interaction, message: str):
-    await interaction.response.defer()
+    await interaction.response.send_message("🔍 جاري البحث والاستعلام...")
     response = await ask_gemini(message)
     if len(response) > 2000:
         response = response[:1990] + "..."
-    await interaction.followup.send(response)
+    await interaction.edit_original_response(content=response)
 
 # 4. /roast command (Sarcastic AI Roast)
 @bot.tree.command(name="roast", description="Gently roasts a member of the server using AI.")
 @app_commands.describe(user="The member you want to roast")
 async def roast(interaction: discord.Interaction, user: discord.Member):
-    await interaction.response.defer()
+    await interaction.response.send_message("🔥 جاري تحضير القصف...")
     prompt = f"Write a highly sarcastic, witty, and savage roast for a Discord user named {user.display_name}. Speak directly to them, keep it sharp, funny, and concise."
-    response = await ask_gemini(prompt)
+    response = await ask_gemini(prompt, system_instruction="أنت بوت ديسكورد مصري ساخر، رد بالعامية المصرية بأسلوب قصف جبهة كوميدي وسلس ومضحك للغاية للشخص المحدد.")
     if len(response) > 2000:
         response = response[:1990] + "..."
-    await interaction.followup.send(f"{user.mention} {response}")
+    await interaction.edit_original_response(content=f"{user.mention} {response}")
+
+# /imagine command — AI Image Generation via Gemini
+@bot.tree.command(name="imagine", description="يولد صورة بالذكاء الاصطناعي بناءً على وصفك.")
+@app_commands.describe(prompt="وصف الصورة اللي عايزها بالعربي أو الانجليزي")
+async def imagine(interaction: discord.Interaction, prompt: str):
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key:
+        await interaction.response.send_message("❌ مفتاح الـ API مش موجود. أضف `GEMINI_API_KEY` في المتغيرات.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("🎨 جاري توليد الصورة، استنى ثواني...")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key={gemini_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": f"Generate a high quality, detailed image of: {prompt}"}]}],
+        "generationConfig": {
+            "responseModalities": ["IMAGE"]
+        }
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    try:
+                        candidates = data.get("candidates", [])
+                        if not candidates:
+                            await interaction.edit_original_response(content="⚠️ الذكاء الاصطناعي ما قدرش يولد الصورة دي (ممكن محتوى مرفوض).")
+                            return
+
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        image_part = None
+                        for part in parts:
+                            if "inlineData" in part:
+                                image_part = part["inlineData"]
+                                break
+
+                        if not image_part:
+                            await interaction.edit_original_response(content="⚠️ الاستجابة ما فيهاش صورة. جرب وصف تاني.")
+                            return
+
+                        image_bytes = base64.b64decode(image_part["data"])
+                        mime = image_part.get("mimeType", "image/png")
+                        ext = "jpg" if "jpeg" in mime else "png"
+                        file = discord.File(fp=io.BytesIO(image_bytes), filename=f"imagine.{ext}")
+
+                        embed = discord.Embed(
+                            title="🎨 الصورة المولّدة",
+                            description=f"**الوصف:** {prompt}",
+                            color=discord.Color.from_rgb(0, 0, 0)
+                        )
+                        embed.set_image(url=f"attachment://imagine.{ext}")
+                        embed.set_footer(text=f"طلب بواسطة {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
+
+                        await interaction.edit_original_response(content=None, attachments=[file], embed=embed)
+
+                    except Exception as parse_err:
+                        logger.error(f"Image parse error: {parse_err}")
+                        await interaction.edit_original_response(content="❌ حصل خطأ في معالجة الصورة.")
+                elif resp.status == 429:
+                    await interaction.edit_original_response(content="⏳ تجاوزت الحد المسموح من الطلبات. استنى دقيقة وجرب تاني.")
+                else:
+                    err = await resp.text()
+                    logger.error(f"Image generation failed: {resp.status} — {err}")
+                    await interaction.edit_original_response(content=f"❌ فشل توليد الصورة (Status {resp.status}).")
+    except Exception as e:
+        logger.error(f"Error in /imagine: {e}")
+        await interaction.edit_original_response(content="❌ حصل استثناء أثناء التواصل مع الـ API.")
 
 # 5. /clear command (Advanced Message Purge - Admin only)
 @bot.tree.command(name="clear", description="Deletes messages in the channel with optional user and keyword filters (Admin only).")
