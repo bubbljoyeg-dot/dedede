@@ -1,8 +1,9 @@
 import os
 import logging
 import asyncio
+import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from dotenv import load_dotenv
 
@@ -36,10 +37,90 @@ class Bot(commands.Bot):
 
 bot = Bot()
 
+# Background task to send a periodic clean status check / interaction prompt
+@tasks.loop(minutes=30)
+async def periodic_check():
+    for guild in bot.guilds:
+        channel = None
+        # Look for the first matching general text channel
+        for ch in guild.text_channels:
+            if ch.name in ["general", "chat", "text-channel-1"]:
+                channel = ch
+                break
+        if not channel and guild.text_channels:
+            channel = guild.text_channels[0]
+            
+        if channel:
+            try:
+                embed = discord.Embed(
+                    description="✦ **System Status**: I'm still alive, unfortunately. Stop wasting time and ask me something useful, or type `/` to see my commands.",
+                    color=discord.Color.from_rgb(0, 0, 0)
+                )
+                await channel.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Failed to send periodic status to guild {guild.name}: {e}")
+
+@periodic_check.before_loop
+async def before_periodic_check():
+    await bot.wait_until_ready()
+
 @bot.event
 async def on_ready():
     logger.info(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     logger.info("Bot is active and ready to process slash commands.")
+    if not periodic_check.is_running():
+        periodic_check.start()
+
+# Helper function to ask Gemini AI
+async def ask_gemini(prompt: str) -> str:
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key:
+        return "⚠️ **Gemini AI is not configured.** Please add the `GEMINI_API_KEY` variable in your Railway dashboard variables to enable chatting."
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "systemInstruction": {
+            "parts": [{"text": "You are a witty, highly sarcastic, and slightly rude Discord bot. You should roast the user gently, use dark humor, and speak with a sharp tongue, but keep it within a fun and playful boundary. Keep your answers concise and structured. Use clean markdown formatting. Your style is sleek black-and-white."}]
+        }
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    text = data['candidates'][0]['content']['parts'][0]['text']
+                    return text
+                else:
+                    logger.error(f"Gemini API returned status {response.status}")
+                    return "⚠️ **Error:** Failed to connect to AI server. Please check your Gemini API key."
+    except Exception as e:
+        logger.error(f"Error querying Gemini: {e}")
+        return "⚠️ **Error:** An exception occurred while contacting the AI."
+
+# Mention listener for natural conversations
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    # Check if bot is mentioned in the message
+    if bot.user in message.mentions:
+        # Strip mentions to get the clean query
+        clean_content = message.content.replace(f"<@!{bot.user.id}>", "").replace(f"<@{bot.user.id}>", "").strip()
+        if not clean_content:
+            await message.reply("✦ Hello! How can I help you today? Type `/` to see my commands or talk to me.")
+            return
+
+        async with message.channel.typing():
+            response = await ask_gemini(clean_content)
+            if len(response) > 2000:
+                response = response[:1990] + "..."
+            await message.reply(response)
+            
+    await bot.process_commands(message)
 
 # Error handler for slash commands
 @bot.tree.error
@@ -115,18 +196,14 @@ async def setup(interaction: discord.Interaction, text_channels: int = 20, voice
     await progress_msg.delete()
     
     embed = discord.Embed(
-        title="🎉 Server Setup Completed Successfully",
-        description="The requested categories and channels have been created.",
-        color=discord.Color.green()
+        title="✦ Server Setup Complete",
+        description="The requested categories and channels have been created successfully.",
+        color=discord.Color.from_rgb(0, 0, 0)
     )
-    embed.add_field(
-        name="📁 Categories Created", 
-        value="• TEXT CHANNELS\n• VOICE CHANNELS" if (text_channels > 0 and voice_channels > 0) else "• Categories created.", 
-        inline=False
-    )
-    embed.add_field(name="📝 Text Channels", value=f"Created **{created_text_count}** channel(s)", inline=True)
-    embed.add_field(name="🔊 Voice Channels", value=f"Created **{created_voice_count}** channel(s)", inline=True)
-    embed.set_footer(text=f"Requested by {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
+    embed.add_field(name="◼ Categories", value="• TEXT CHANNELS\n• VOICE CHANNELS", inline=False)
+    embed.add_field(name="◼ Text Channels", value=f"Created **{created_text_count}** channel(s)", inline=True)
+    embed.add_field(name="◼ Voice Channels", value=f"Created **{created_voice_count}** channel(s)", inline=True)
+    embed.set_footer(text=f"Executed by {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
     
     await interaction.followup.send(embed=embed)
 
@@ -160,7 +237,7 @@ async def cleanup(interaction: discord.Interaction):
                     deleted_channels += 1
                 except Exception as e:
                     logger.error(f"Failed to delete channel {channel.name}: {e}")
-                await asyncio.sleep(0.3) # Rate limit safeguard
+                await asyncio.sleep(0.3)
 
             # Delete the category itself
             await progress_msg.edit(content=f"🗑️ Deleting category: **{category.name}**...")
@@ -176,21 +253,31 @@ async def cleanup(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🗑️ Cleanup Completed",
         description="The default setup categories and channels have been deleted.",
-        color=discord.Color.red()
+        color=discord.Color.from_rgb(0, 0, 0)
     )
-    embed.add_field(name="📁 Categories Deleted", value=str(deleted_categories), inline=True)
-    embed.add_field(name="💬 Channels Deleted", value=str(deleted_channels), inline=True)
+    embed.add_field(name="◼ Categories Deleted", value=str(deleted_categories), inline=True)
+    embed.add_field(name="◼ Channels Deleted", value=str(deleted_channels), inline=True)
     embed.set_footer(text=f"Executed by {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
 
     await interaction.followup.send(embed=embed)
 
-# 3. /ping command
+# 3. /chat command (Gemini AI Chat)
+@bot.tree.command(name="chat", description="Chat directly with the bot's AI.")
+@app_commands.describe(message="What do you want to say to the bot?")
+async def chat(interaction: discord.Interaction, message: str):
+    await interaction.response.defer()
+    response = await ask_gemini(message)
+    if len(response) > 2000:
+        response = response[:1990] + "..."
+    await interaction.followup.send(response)
+
+# 4. /ping command
 @bot.tree.command(name="ping", description="Returns the bot latency in milliseconds.")
 async def ping(interaction: discord.Interaction):
     latency = round(bot.latency * 1000)
     await interaction.response.send_message(f"🏓 Pong! Latency is `{latency}ms`.")
 
-# 4. /serverinfo command
+# 5. /serverinfo command
 @bot.tree.command(name="serverinfo", description="Shows information about the Discord server.")
 async def serverinfo(interaction: discord.Interaction):
     guild = interaction.guild
@@ -213,23 +300,18 @@ async def serverinfo(interaction: discord.Interaction):
     roles_count = len(guild.roles)
     
     embed = discord.Embed(
-        title=f"ℹ️ Server Info - {guild.name}",
-        color=discord.Color.blue()
+        title=f"✦ Server Info - {guild.name}",
+        color=discord.Color.from_rgb(0, 0, 0)
     )
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
         
-    embed.add_field(name="Server Name", value=guild.name, inline=True)
-    embed.add_field(name="Server ID", value=guild.id, inline=True)
-    embed.add_field(name="Owner", value=owner_str, inline=False)
-    embed.add_field(name="Total Members", value=guild.member_count, inline=True)
-    embed.add_field(name="Total Roles", value=roles_count, inline=True)
-    embed.add_field(name="Categories", value=categories, inline=True)
-    embed.add_field(name="Text Channels", value=text_channels, inline=True)
-    embed.add_field(name="Voice Channels", value=voice_channels, inline=True)
+    embed.add_field(name="◼ General Info", value=f"**Name:** {guild.name}\n**ID:** {guild.id}\n**Owner:** {owner_str}", inline=False)
+    embed.add_field(name="◼ Statistics", value=f"**Members:** {guild.member_count}\n**Roles:** {roles_count}\n**Categories:** {categories}", inline=True)
+    embed.add_field(name="◼ Channels", value=f"**Text:** {text_channels}\n**Voice:** {voice_channels}", inline=True)
     
     created_at_str = guild.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    embed.add_field(name="Created At", value=created_at_str, inline=False)
+    embed.add_field(name="◼ Created At", value=created_at_str, inline=False)
     
     embed.set_footer(text=f"Requested by {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
     
@@ -237,7 +319,6 @@ async def serverinfo(interaction: discord.Interaction):
 
 # --- Voice & Soundboard Commands ---
 
-# Helper function to join user's voice channel
 async def join_user_vc(interaction: discord.Interaction):
     if not interaction.user.voice or not interaction.user.voice.channel:
         await interaction.response.send_message("❌ You must be in a voice channel to use this command.", ephemeral=True)
@@ -269,7 +350,6 @@ async def leave(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ The bot is not connected to any voice channel.", ephemeral=True)
 
-# Preset Soundboard Sounds using direct mp3 URLs
 SOUNDS = {
     "airhorn": "https://www.myinstants.com/media/sounds/mlg-airhorn.mp3",
     "bruh": "https://www.myinstants.com/media/sounds/movie_1.mp3",
@@ -286,7 +366,6 @@ SOUNDS = {
     app_commands.Choice(name="Sad Violin 🎻", value="sad_violin")
 ])
 async def play_sound(interaction: discord.Interaction, sound: app_commands.Choice[str]):
-    # Check PyNaCl & FFmpeg status
     try:
         import nacl
     except ImportError:
@@ -297,19 +376,17 @@ async def play_sound(interaction: discord.Interaction, sound: app_commands.Choic
     if not voice_client:
         voice_client = await join_user_vc(interaction)
         if not voice_client:
-            return  # user wasn't in a voice channel
+            return
             
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=False)
 
-    # If already playing, stop it
     if voice_client.is_playing():
         voice_client.stop()
 
     sound_url = SOUNDS[sound.value]
     
     try:
-        # Create audio source (requires ffmpeg installed on system)
         audio_source = discord.FFmpegPCMAudio(sound_url)
         voice_client.play(audio_source)
         await interaction.followup.send(f"🔊 Playing sound effect: **{sound.name}**!")
